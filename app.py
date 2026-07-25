@@ -19,7 +19,8 @@ _CLI_PARSED = False
 
 
 def _parse_cli_early():
-    """模块顶层解析 --symbol/--port/--trade-size，在策略引擎导入前设置环境变量"""
+    """模块顶层解析 --symbol/--port/--trade-size，在策略引擎导入前设置环境变量。
+    本项目为 ETH 收益增强策略：未显式指定 --symbol 时默认 ETH_USDC。"""
     global _CLI_PARSED
     if _CLI_PARSED or not hasattr(sys, 'argv') or len(sys.argv) < 2:
         return
@@ -29,9 +30,12 @@ def _parse_cli_early():
     parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--trade-size", type=float, default=None)
     args, _ = parser.parse_known_args()
+    # 默认标的：本项目为 ETH 收益增强策略，防止漏带 --symbol 时静默跑 BTC
+    if not args.symbol:
+        args.symbol = "ETH_USDC"
     if args.symbol:
         instr_idx = {"BTC_USDC": ("BTC_USDC", "btc_usdc"), "ETH_USDC": ("ETH_USDC", "eth_usdc")}
-        instr, idx = instr_idx.get(args.symbol, ("BTC_USDC", "btc_usdc"))
+        instr, idx = instr_idx.get(args.symbol, ("ETH_USDC", "eth_usdc"))
         ts = args.trade_size if args.trade_size else (50 if args.symbol == "ETH_USDC" else 100)
         os.environ["STRAT_INSTRUMENT"] = instr
         os.environ["STRAT_INDEX"] = idx
@@ -338,9 +342,10 @@ def api_params():
                 "trade_size_usdc": cfg["trade_size_usdc"],
                 "rv_min": cfg["rv_min"],
                 "rv_max": cfg["rv_max"],
-                "rv_update_interval_minutes": cfg.get("rv_update_interval_minutes", 60),
+                "rv_update_interval_minutes": cfg.get("rv_update_interval_minutes", 15),
                 "poll_interval": cfg["poll_interval"],
-                "cooldown_seconds": cfg.get("cooldown_seconds", 60),
+                "cooldown_seconds": cfg.get("cooldown_seconds", 180),
+                "stale_threshold": cfg.get("stale_threshold", 0.5),
                 "min_poll_balance_usdc": cfg["min_poll_balance_usdc"],
             })
 
@@ -371,6 +376,7 @@ def api_params():
             "trade_size_usdc": (10, 10000),
             "rv_min": (0.0001, 0.05),
             "rv_max": (0.001, 0.1),
+            "stale_threshold": (0.01, 1000),
             "min_poll_balance_usdc": (10, 10000),
         }
         for key, (lo, hi) in param_ranges_float.items():
@@ -478,7 +484,7 @@ def api_config():
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="BTC/ETH 收益增强策略")
-    parser.add_argument("--symbol", default="BTC_USDC", choices=["BTC_USDC", "ETH_USDC"], help="交易标的")
+    parser.add_argument("--symbol", default="ETH_USDC", choices=["BTC_USDC", "ETH_USDC"], help="交易标的")
     parser.add_argument("--port", type=int, default=5050, help="Web 端口")
     parser.add_argument("--trade-size", type=float, default=None, help="单笔交易额 USDC（默认 BTC=100, ETH=50）")
     args = parser.parse_args()
@@ -488,7 +494,7 @@ if __name__ == "__main__":
 
     print("=" * 60)
     print(f"  {args.symbol.replace('_', '/')} 收益增强策略 - Dashboard + WebSocket")
-    print(f"  http://localhost:{args.port}")
+    print(f"  http://127.0.0.1:{args.port}")
     print(f"  单笔交易: ${trade_size}  标的: {args.symbol}")
     print("=" * 60)
     app.run(host="127.0.0.1", port=args.port, debug=False)

@@ -129,9 +129,9 @@ DERIBIT_TESTNET=1   # 1 = testnet, 0 = mainnet
 python app.py
 ```
 
-Then open your browser to: **http://localhost:5050**
+Then open your browser to: **http://127.0.0.1:5050**
 
-启动后浏览器打开 **http://localhost:5050** 即可看到仪表盘。
+启动后浏览器打开 **http://127.0.0.1:5050** 即可看到仪表盘。
 
 ---
 
@@ -151,7 +151,7 @@ The dashboard runs a real-time web UI at port 5050:
 | **WebSocket push** | All data updates in real-time |
 
 操作流程：
-1. 打开 http://localhost:5050
+1. 打开 http://127.0.0.1:5050
 2. 如果 .env 没有凭证，在页面填写 API ID/Secret 并保存
 3. 点击 **🔌 测试连接** 确认连接成功
 4. 点击 **▶ 启动** → 策略初始化（连接、余额、锚点、RV）→ 状态变为"就绪"
