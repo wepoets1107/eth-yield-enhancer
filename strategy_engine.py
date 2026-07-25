@@ -206,13 +206,18 @@ class StrategyEngine:
 
     @staticmethod
     def _load_state():
-        """从文件恢复锚点和初始值"""
+        """从文件恢复状态（交易记录、锚点、初始值）
+
+        注意：只要 state 文件存在且为合法 JSON dict 就返回，不再要求
+        anchor_price > 0 —— 锚点是运行时从交易所指数价动态设置的，state
+        里经常是 0，用 anchor>0 作闸门会导致交易记录整体无法恢复。
+        """
         try:
             if not os.path.exists(STATE_FILE):
                 return None
             with open(STATE_FILE, "r") as f:
                 data = json.load(f)
-            if data.get("anchor_price", 0) > 0:
+            if isinstance(data, dict):
                 return data
         except Exception:
             pass
@@ -497,15 +502,10 @@ class StrategyEngine:
             return False
         self.eth_index_price = price
 
-        # 4. 锚点 + 初始值：优先恢复上次保存的值，首次部署才 snapshot
+        # 4. 状态恢复：交易记录与初始值无条件恢复；锚点按可用性恢复
         saved = self._load_state()
-        if saved and abs(saved["anchor_price"] - price) / price < 0.10:
-            self.anchor_price = saved["anchor_price"]
-            self.initial_usdc = saved.get("initial_usdc", bal["usdc_balance"])
-            self.initial_btc = saved.get("initial_btc", bal["btc_balance"])
-            self.initial_total_usdc = saved.get("initial_total_usdc",
-                bal["usdc_balance"] + bal["btc_balance"] * price)
-            # 恢复历史交易记录
+        if saved:
+            # —— 交易记录：无条件恢复（与锚点价格无关）——
             old_trades = saved.get("trades", [])
             if old_trades:
                 self.trades = old_trades
@@ -517,14 +517,26 @@ class StrategyEngine:
                 self.buy_inventory = [list(x) for x in saved.get("buy_inventory", [])]
             else:
                 self._recompute_inventory_from_trades()
-            logger.info("Anchor restored from saved state: %.2f (current price: %.2f)",
-                        self.anchor_price, price)
+            # 初始值：恢复（用于 PNL 计算），缺失则用当前余额兜底
+            self.initial_usdc = saved.get("initial_usdc", bal["usdc_balance"])
+            self.initial_btc = saved.get("initial_btc", bal["btc_balance"])
+            self.initial_total_usdc = saved.get("initial_total_usdc",
+                bal["usdc_balance"] + bal["btc_balance"] * price)
             # 重启后自动恢复交易状态
             if saved.get("was_trading"):
                 self._trading_enabled = True
                 logger.info("Trading auto-resumed from saved state")
+            # —— 锚点：仅在保存锚与当前价偏差 <10% 时恢复，否则用当前指数价 ——
+            if saved.get("anchor_price", 0) > 0 and abs(saved["anchor_price"] - price) / price < 0.10:
+                self.anchor_price = saved["anchor_price"]
+                logger.info("Anchor restored from saved state: %.2f (current price: %.2f)",
+                            self.anchor_price, price)
+            else:
+                self.anchor_price = price
+                logger.info("Anchor set to current index price: %.2f (saved anchor not reusable)",
+                            price)
         else:
-            # 首次部署或 state 坏了：用当前 balance snapshot 作为初始值
+            # 首次部署或 state 损坏：用当前 balance snapshot 作为初始值
             if self.initial_total_usdc == 0:
                 self.initial_usdc = bal["usdc_balance"]
                 self.initial_btc = bal["btc_balance"]
