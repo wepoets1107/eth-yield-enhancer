@@ -439,7 +439,7 @@ def api_test_connection():
         info = client.check_connection()
         if info["connected"]:
             price = client.get_index_price(_idx)
-            info["btc_index_price"] = price
+            info["eth_index_price"] = price
             info["spot_currency"] = _spot
             try:
                 usdc = client.get_account_summary(currency="USDC")

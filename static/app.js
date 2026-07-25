@@ -170,11 +170,11 @@
       }
     }
 
-    setVal("vPrice", fmtAnchor(data.btc_index_price), "highlight");
+    setVal("vPrice", fmtAnchor(data.eth_index_price), "highlight");
 
     var dev = "--";
-    if (data.anchor_price > 0 && data.btc_index_price) {
-      var d = (data.btc_index_price / data.anchor_price - 1) * 100;
+    if (data.anchor_price > 0 && data.eth_index_price) {
+      var d = (data.eth_index_price / data.anchor_price - 1) * 100;
       dev = (d >= 0 ? "+" : "") + d.toFixed(2) + "%";
     }
     setVal("vDeviation", dev, clsVal(parseFloat(dev.replace("%", "").replace("+", ""))));
@@ -308,7 +308,7 @@
       if (d.mainnet && d.testnet) {
         m += "主网: " + (d.mainnet.connected ? "✅" : "❌ " + (d.mainnet.auth_error || "断开"));
         m += "\n测试网: " + (d.testnet.connected ? "✅" : "❌ " + (d.testnet.auth_error || "断开"));
-        if (d.testnet.connected) m += "\n" + _sym + " $" + (d.testnet.btc_index_price || "N/A") + " · USDC " + (d.testnet.usdc_balance || "N/A");
+        if (d.testnet.connected) m += "\n" + _sym + " $" + (d.testnet.eth_index_price || "N/A") + " · USDC " + (d.testnet.usdc_balance || "N/A");
       } else { m = d.connected ? "✅ 已连接" : "❌ " + (d.auth_error || "失败"); }
       alert(m);
     } catch (e) { alert("❌ " + e.message); }

@@ -92,7 +92,7 @@ class StrategyEngine:
         self.btc_balance = 0.0
         self.btc_value_usdc = 0.0
         self.total_value_usdc = 0.0
-        self.btc_index_price = 0.0
+        self.eth_index_price = 0.0
         self.anchor_price = 0.0
         self.daily_rv = self.cfg["rv_min"]
         self.upper_threshold = 0.0
@@ -349,7 +349,7 @@ class StrategyEngine:
                 "btc_balance": self.btc_balance,
                 "btc_value_usdc": self.btc_value_usdc,
                 "total_value_usdc": self.total_value_usdc,
-                "btc_index_price": self.btc_index_price,
+                "eth_index_price": self.eth_index_price,
                 "anchor_price": self.anchor_price,
                 "daily_rv": self.daily_rv,
                 "upper_threshold": self.upper_threshold,
@@ -495,7 +495,7 @@ class StrategyEngine:
         if not price or price <= 0:
             logger.error("Cannot get index price")
             return False
-        self.btc_index_price = price
+        self.eth_index_price = price
 
         # 4. 锚点 + 初始值：优先恢复上次保存的值，首次部署才 snapshot
         saved = self._load_state()
@@ -655,7 +655,7 @@ class StrategyEngine:
                     self._last_ws_balance_update = time.time()
                     if abs(self.btc_balance - old) > 1e-6:
                         logger.info("WS[%s]: %.6f -> %.6f", self._spot_currency_lower, old, self.btc_balance)
-                    if self.btc_index_price > 0:
+                    if self.eth_index_price > 0:
                         self._recalc_values()
             elif channel == "user.portfolio.usdc":
                 bal = data.get("balance", 0)
@@ -665,16 +665,16 @@ class StrategyEngine:
                     self._last_ws_balance_update = time.time()
                     if abs(self.usdc_balance - old) > 1e-6:
                         logger.info("WS[usdc]: %.2f -> %.2f", old, self.usdc_balance)
-                    if self.btc_index_price > 0:
-                        self.btc_value_usdc = self.btc_balance * self.btc_index_price
+                    if self.eth_index_price > 0:
+                        self.btc_value_usdc = self.btc_balance * self.eth_index_price
                         self.total_value_usdc = self.usdc_balance + self.btc_value_usdc
             elif "index" in channel:
                 idx = data.get("index_price") or data.get("idx")
                 if idx is not None and float(idx) > 0:
-                    old = self.btc_index_price
-                    self.btc_index_price = float(idx)
-                    if abs(self.btc_index_price - old) > 0.1:
-                        logger.info("WS[index]: %.2f -> %.2f", old, self.btc_index_price)
+                    old = self.eth_index_price
+                    self.eth_index_price = float(idx)
+                    if abs(self.eth_index_price - old) > 0.1:
+                        logger.info("WS[index]: %.2f -> %.2f", old, self.eth_index_price)
                     self._last_ws_index_update = time.time()
                     self._recalc_values()
                     self.api_connected = True
@@ -687,7 +687,7 @@ class StrategyEngine:
 
     def _recalc_values(self):
         """根据当前余额和指数价重算 USDC 价值"""
-        self.btc_value_usdc = self.btc_balance * self.btc_index_price
+        self.btc_value_usdc = self.btc_balance * self.eth_index_price
         self.total_value_usdc = self.usdc_balance + self.btc_value_usdc
 
     # ------------------------------------------------------------------
@@ -702,7 +702,7 @@ class StrategyEngine:
         """获取指数价：优先 WS 实时数据，WS 过期时 fallback REST"""
         now = time.time()
         # WS 有数据且在 30 秒内更新过，直接用
-        if self._ws_enabled and self.btc_index_price > 0 and (now - self._last_ws_index_update) < 30:
+        if self._ws_enabled and self.eth_index_price > 0 and (now - self._last_ws_index_update) < 30:
             return
         # REST fallback（限制频率）
         if now - self._last_index_rest_ts < self._INDEX_REST_INTERVAL:
@@ -713,7 +713,7 @@ class StrategyEngine:
         except Exception:
             price = None
         if price and price > 0:
-            self.btc_index_price = price
+            self.eth_index_price = price
             self._recalc_values()
             self.api_connected = True
         elif not self._ws_enabled or not self._ws or not self._ws.connected:
@@ -779,7 +779,7 @@ class StrategyEngine:
     def _check_funds(self):
         """资金保护：USDC 或 BTC 价值低于 $200 时暂停对应方向"""
         threshold = self.cfg["min_poll_balance_usdc"]  # $200
-        price = self.btc_index_price
+        price = self.eth_index_price
 
         # USDC 检查
         if self.usdc_balance < threshold:
@@ -938,7 +938,7 @@ class StrategyEngine:
                     self.api.cancel_order(other_id)
                     setattr(self, "_our_buy_id" if side_key == "sell" else "_our_sell_id", None)
                 # --- 方案A（后继）：成交后检查新锚点是否偏离当前指数价，偏离则继续追 ---
-                idx = self.btc_index_price
+                idx = self.eth_index_price
                 if idx > 0:
                     deviation = abs(idx / self.anchor_price - 1)
                     if deviation > self.daily_rv:
@@ -964,8 +964,23 @@ class StrategyEngine:
                         self._our_buy_id = None
                     else:
                         self._our_sell_id = None
-                    self._log_info("Cancelled stale %s order at %.2f (target %.2f)",
-                                   o["side"], o["price"], target)
+                self._log_info("Cancelled stale %s order at %.2f (target %.2f)",
+                               o["side"], o["price"], target)
+
+        # --- 孤儿单清理：交易所滞留、引擎未追踪、且已偏离目标价的本策略挂单 ---
+        # 认领只认价格精确等于目标价，stale 撤单只对引擎记录的 ID 生效；
+        # 若老单 ID 丢失（重启 / 历史挂单），两端都漏，老单永久滞留。
+        # 补一道：未被引擎追踪、且偏离当前目标价 > stale_threshold 的同侧挂单，直接撤掉。
+        stale_th = self.cfg.get("stale_threshold", 0.5)
+        for o in self.open_orders:
+            oid = o["order_id"]
+            if oid == self._our_buy_id or oid == self._our_sell_id:
+                continue
+            target_px = buy_price if o["side"] == "buy" else sell_price
+            if abs(o["price"] - target_px) > stale_th:
+                self.api.cancel_order(oid)
+                self._log_info("Cancelled orphan %s order %s at %.2f (target %.2f)",
+                               o["side"], oid, o["price"], target_px)
 
         # --- 冷静期：成交后 3 分钟内不挂新单（但成交检测照常进行）---
         if time.time() < self._cooldown_until:
