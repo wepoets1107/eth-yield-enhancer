@@ -34,6 +34,88 @@ def _f(value: Any, default: float = 0.0) -> float:
         return default
 
 
+# ---------------------------------------------------------------------------
+# 错误分级（参考 ccxt deribit.exceptions 映射，归纳为业务类别）
+# 目的：让调用方能按错误类型决定 重试 / 告警 / 暂停该侧 / 视为已处理，
+# 而非把限频抖动与致命鉴权失败混在同一份日志里。
+# ---------------------------------------------------------------------------
+# Deribit JSON-RPC 错误码 -> 业务类别
+DERIBIT_ERROR_CATEGORY: dict = {
+    # 认证/授权失败（凭据/2FA/banned 等）：不可重试，需人工排查
+    10000: "auth", 12000: "auth", 12003: "auth", 12004: "auth", 12005: "auth",
+    12998: "auth", 12999: "auth", 13000: "auth", 13001: "auth", 13003: "auth",
+    13004: "auth", 13005: "auth", 13006: "auth", 13007: "auth", 13009: "auth",
+    # 限流 / 撮合队列满（DDoSProtection）：可重试（指数退避）
+    10028: "rate_limit", 10047: "rate_limit", 11035: "rate_limit",
+    11093: "rate_limit", 12001: "rate_limit",
+    # 资金不足（InsufficientFunds）：不可重试，挂起对应方向
+    10009: "insufficient_funds",
+    # 订单不存在（OrderNotFound）：视为已处理
+    10004: "order_not_found", 10010: "order_not_found", 10029: "order_not_found",
+    # 订单参数非法（含 tick/精度错误 InvalidOrder）：不可重试，属代码缺陷
+    10002: "invalid_order", 10003: "invalid_order", 10005: "invalid_order",
+    10006: "invalid_order", 10007: "invalid_order", 10008: "invalid_order",
+    10011: "invalid_order", 10012: "invalid_order", 10021: "invalid_order",
+    10022: "invalid_order", 10023: "invalid_order", 10024: "invalid_order",
+    10025: "invalid_order", 10026: "invalid_order", 10027: "invalid_order",
+    10032: "invalid_order", 10034: "invalid_order", 10035: "invalid_order",
+    10036: "invalid_order", 10043: "invalid_order", 10044: "invalid_order",
+    10045: "invalid_order", 10046: "invalid_order", 11008: "invalid_order",
+    11036: "invalid_order", 11038: "invalid_order", 11039: "invalid_order",
+    11041: "invalid_order", 11044: "invalid_order", 11054: "invalid_order",
+    # 参数错误（含 tick 精度 / JSON-RPC 参数 BadRequest）：不可重试
+    11029: "bad_request", 11037: "bad_request", 11043: "bad_request",
+    11045: "bad_request", 11046: "bad_request", 11047: "bad_request",
+    11049: "bad_request", 11050: "bad_request", 13010: "bad_request",
+    13011: "bad_request",
+    13013: "bad_request", 13014: "bad_request", 13015: "bad_request",
+    13016: "bad_request", -32602: "bad_request", -32601: "bad_request",
+    -32700: "bad_request", -32000: "bad_request",
+    # 权限拒绝（PermissionDenied）：不可重试
+    10013: "permission_denied", 10014: "permission_denied", 10015: "permission_denied",
+    10016: "permission_denied", 10017: "permission_denied", 10018: "permission_denied",
+    10019: "permission_denied", 11042: "permission_denied", 13002: "permission_denied",
+    13012: "permission_denied", 13021: "permission_denied",
+    # 交易所不可用（ExchangeNotAvailable）：可重试
+    10040: "exchange_not_available",
+    # 维护中（OnMaintenance）：等待，不重试
+    10041: "on_maintenance", 11051: "on_maintenance",
+    # 通用交易所错误（ExchangeError）：视为瞬时，可重试
+    10001: "exchange_error", 10020: "exchange_error", 10030: "exchange_error",
+    10031: "exchange_error", 10048: "exchange_error", 11030: "exchange_error",
+    11031: "exchange_error", 11048: "exchange_error", 11052: "exchange_error",
+    11053: "exchange_error", 11094: "exchange_error", 11095: "exchange_error",
+    11096: "exchange_error", 12002: "exchange_error", 12100: "exchange_error",
+    13008: "exchange_error", 13017: "exchange_error", 13018: "exchange_error",
+    13019: "exchange_error", 13020: "exchange_error", 13025: "exchange_error",
+    # 其他明确类别（不重试）
+    10033: "not_supported",
+    11090: "invalid_address", 11091: "invalid_address", 11092: "invalid_address",
+}
+
+# 可重试的类别（参考 ccxt：限流/不可用属瞬时，退避后大概率恢复）
+RETRYABLE_CATEGORIES = {"rate_limit", "exchange_not_available", "exchange_error"}
+
+
+def _backoff(attempt: int) -> float:
+    """指数退避：1, 2, 4, 8 秒封顶"""
+    return min(8.0, 2.0 ** attempt)
+
+
+def _classify_error(err: Any) -> tuple:
+    """把 Deribit 错误归一为 (code, category, is_retryable, message)"""
+    code = None
+    msg = ""
+    if isinstance(err, dict):
+        code = err.get("code")
+        msg = err.get("message", "")
+    else:
+        msg = str(err)
+    category = DERIBIT_ERROR_CATEGORY.get(code, "unknown")
+    is_retryable = category in RETRYABLE_CATEGORIES
+    return code, category, is_retryable, msg
+
+
 class DeribitClient:
     """Deribit JSON-RPC API 客户端（同步、线程安全）"""
 
@@ -69,8 +151,15 @@ class DeribitClient:
         method: str,
         params: Optional[dict] = None,
         need_auth: bool = False,
+        max_retries: int = 4,
     ) -> dict:
-        """发送 JSON-RPC POST 请求，统一返回 {success, result/error}"""
+        """发送 JSON-RPC POST 请求，统一返回 {success, result/error, error_code, error_category, }。
+
+        参考 ccxt 的设计：
+        - 把 Deribit 错误码归类为业务类别，调用方可据此分流；
+        - 瞬时错误（限流 / 交易所不可用 / 通用交易所错误）自动指数退避重试，
+          最多 max_retries 次；认证 / 资金不足 / 订单参数等明确错误不重试。
+        """
         if params is None:
             params = {}
 
@@ -84,43 +173,82 @@ class DeribitClient:
             "params": params,
         }
 
+        # 鉴权一次性获取：重试期间不再反复刷新 token，避免抖动被放大
         headers = {}
         if need_auth or method.startswith("private"):
             token = self._get_token()
             if token:
                 headers["Authorization"] = f"Bearer {token}"
+            else:
+                logger.error("Deribit: no auth token available for [%s]", method)
+                return {
+                    "success": False,
+                    "error": "auth_token_unavailable",
+                    "error_code": None,
+                    "error_category": "auth",
+                    "is_retryable": False,
+                }
 
-        try:
-            resp = requests.post(
-                self.base_url,
-                json=payload,
-                headers=headers,
-                timeout=20,
-            )
-            if resp.status_code != 200:
-                logger.error(
-                    "Deribit HTTP %d [%s]: %s",
-                    resp.status_code, method, resp.text[:500],
+        last_result: dict = {"success": False, "error": "unknown"}
+        for attempt in range(max_retries):
+            try:
+                resp = requests.post(
+                    self.base_url,
+                    json=payload,
+                    headers=headers,
+                    timeout=20,
                 )
-            data = resp.json()
-
-            # JSON-RPC error（Deribit 正常响应但业务错误）
-            if "error" in data and data["error"] is not None:
-                err = data["error"]
-                if isinstance(err, dict):
-                    logger.error(
-                        "Deribit API error [%s]: code=%s msg=%s",
-                        method, err.get("code"), err.get("message"),
+                if resp.status_code != 200:
+                    # 网关 / 5xx：视为瞬时，退避后重试
+                    logger.warning(
+                        "Deribit HTTP %d [%s] attempt %d: %s",
+                        resp.status_code, method, attempt + 1, resp.text[:200],
                     )
-                else:
-                    logger.error("Deribit API error [%s]: %s", method, err)
-                return {"success": False, "error": err}
+                    last_result = {"success": False, "error": f"HTTP {resp.status_code}"}
+                    if attempt < max_retries - 1:
+                        time.sleep(_backoff(attempt))
+                    continue
 
-            return {"success": True, "result": data.get("result")}
+                data = resp.json()
 
-        except requests.exceptions.RequestException as e:
-            logger.error("Deribit request failed [%s]: %s", method, e)
-            return {"success": False, "error": str(e)}
+                # JSON-RPC error（Deribit 正常响应但业务错误）
+                if "error" in data and data["error"] is not None:
+                    err = data["error"]
+                    code, category, is_retryable, msg = _classify_error(err)
+                    logger.error(
+                        "Deribit API error [%s] code=%s cat=%s: %s",
+                        method, code, category, msg,
+                    )
+                    last_result = {
+                        "success": False,
+                        "error": err,
+                        "error_code": code,
+                        "error_category": category,
+                        "is_retryable": is_retryable,
+                    }
+                    if is_retryable and attempt < max_retries - 1:
+                        logger.warning(
+                            "Retryable error (%s), backoff %.1fs",
+                            category, _backoff(attempt),
+                        )
+                        time.sleep(_backoff(attempt))
+                        continue
+                    return last_result
+
+                return {"success": True, "result": data.get("result")}
+
+            except (requests.exceptions.RequestException, ValueError) as e:
+                # 网络异常 / 响应非 JSON（如 502 网关）：视为瞬时，退避重试
+                logger.warning(
+                    "Deribit request failed [%s] attempt %d: %s",
+                    method, attempt + 1, e,
+                )
+                last_result = {"success": False, "error": str(e)}
+                if attempt < max_retries - 1:
+                    time.sleep(_backoff(attempt))
+                continue
+
+        return last_result
 
     # ------------------------------------------------------------------
     # 认证（带自动续期 + 线程安全）

@@ -1,11 +1,11 @@
 @echo off
 chcp 65001 >nul
-title BTC 收益增强策略
+title ETH 收益增强策略
 
 cd /d "%~dp0"
 
 echo ==============================
-echo   BTC 收益增强策略 - 启动
+echo   ETH 收益增强策略 - 启动
 echo ==============================
 
 :: 1. 加载 .env
@@ -47,28 +47,28 @@ echo.
 :: 3. 启动（后台运行，不依赖新窗口编码）
 echo [3/3] 启动服务...
 echo   关闭旧进程(如有)...
-for /f "tokens=2 delims= " %%a in ('netstat -ano ^| findstr ":5050 " ^| findstr "LISTENING"') do (
+for /f "tokens=2 delims= " %%a in ('netstat -ano ^| findstr ":5052 " ^| findstr "LISTENING"') do (
     taskkill /F /PID %%a >nul 2>&1
 )
 timeout /t 2 /nobreak >nul
 
 echo   启动 Flask...
-start /B "" "%PYTHON%" app.py
+start /B "" "%PYTHON%" app.py --port 5052 --symbol ETH_USDC
 timeout /t 3 /nobreak >nul
 
 :: 等待就绪并初始化引擎
 echo   初始化引擎...
 for /l %%i in (1,1,20) do (
-    >nul 2>&1 curl -s http://127.0.0.1:5050/api/init && (
+    >nul 2>&1 curl -s http://127.0.0.1:5052/api/init && (
         echo ? 服务就绪
         goto :done
     )
     >nul ping -n 2 127.0.0.1
 )
-echo ? 启动超时，请手动打开 http://127.0.0.1:5050/
+echo ? 启动超时，请手动打开 http://127.0.0.1:5052/
 
 :done
-start http://127.0.0.1:5050/
+start http://127.0.0.1:5052/
 echo.
 echo ? 启动完成！
 echo    仪表盘已打开

@@ -9,6 +9,7 @@ BTC 收益增强策略 - Flask Web 应用
 import os
 import json
 import logging
+import logging.handlers
 import sys
 import threading
 import time as pytime
@@ -51,12 +52,32 @@ from flask_sock import Sock
 from strategy_engine import StrategyEngine
 from deribit_api import DeribitClient
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    stream=sys.stdout,
-    force=True,
-)
+def _setup_logging():
+    """配置日志：同时落盘(logs/eth.log, 滚动)与控制台。
+
+    pythonw 下 stdout 被重定向到 os.devnull, 控制台 handler 无效但无害；
+    关键是所有模块日志都通过 root logger 写入 eth.log, 解决可观测性缺口。
+    """
+    log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, "eth.log")
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    # 避免 reload 场景叠加重复 handler
+    if not any(isinstance(h, logging.handlers.RotatingFileHandler) for h in root.handlers):
+        fh = logging.handlers.RotatingFileHandler(
+            log_file, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+        )
+        fh.setFormatter(fmt)
+        root.addHandler(fh)
+    if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler) for h in root.handlers):
+        sh = logging.StreamHandler(sys.stdout)
+        sh.setFormatter(fmt)
+        root.addHandler(sh)
+
+
+_setup_logging()
 logger = logging.getLogger(__name__)
 
 ENV_FILE = os.path.join(os.path.dirname(__file__), ".env")
