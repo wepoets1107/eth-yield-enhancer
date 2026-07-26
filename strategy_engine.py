@@ -112,7 +112,7 @@ class StrategyEngine:
         self.realized_pnl = 0.0          # 累计已实现交易盈亏（增量维护，不依赖 trades 历史长度）
         self.buy_inventory = []          # 未平仓买入库存 FIFO: [[amount, price], ...]
         self._cooldown_until = 0.0        # 防频繁交易的冷却时间（秒时间戳）
-        self._cooldown_seconds = self.cfg.get("cooldown_seconds", 180)  # 冷静期：每次成交后暂停
+        # cooldown 直接读 self.cfg.get("cooldown_seconds", 180)（方案2 已移除冗余缓存变量 _cooldown_seconds）
         self._trading_enabled = False      # 交易开关：就绪后默认不交易，用户点击"启动"才开
         self.open_orders: list[dict] = []  # 当前挂单列表
         self._our_buy_id: Optional[str] = None   # 我们挂的买入单 ID
@@ -896,8 +896,8 @@ class StrategyEngine:
                 self._log_info("%s maker order %s was filled!", side_key, our_id)
                 setattr(self, our_id_attr, None)
                 # 触发冷静期
-                self._cooldown_until = time.time() + self._cooldown_seconds
-                self._log_info("Cooldown activated: %ds", self._cooldown_seconds)
+                self._cooldown_until = time.time() + self.cfg.get("cooldown_seconds", 180)
+                self._log_info("Cooldown activated: %ds", self.cfg.get("cooldown_seconds", 180))
                 # 从交易所拉实际成交价（比阈值价更准确）
                 fill_price = sell_price if side_key == "sell" else buy_price  # 默认值
                 trade_amount = self.cfg["trade_size_usdc"] / fill_price
@@ -967,8 +967,8 @@ class StrategyEngine:
                         self._recalc_thresholds()
                         self._log_info("方案A: Anchor追 %.2f -> %.2f (deviation %.4f%%), RV=%.2f%%",
                                        old_anchor, idx, deviation * 100, self.daily_rv * 100)
-                        self._cooldown_until = time.time() + self._cooldown_seconds
-                        self._log_info("方案A: Cooldown %ds", self._cooldown_seconds)
+                        self._cooldown_until = time.time() + self.cfg.get("cooldown_seconds", 180)
+                        self._log_info("方案A: Cooldown %ds", self.cfg.get("cooldown_seconds", 180))
                         # 对侧挂单已在成交处理中取消，此处无需重复 cancel
                         # 统一走 _round_price，保持与正常路径一致的 tick 精度
                         buy_price = self._round_price(self.lower_threshold)
