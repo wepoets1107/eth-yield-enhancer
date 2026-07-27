@@ -763,9 +763,9 @@ class StrategyEngine:
             for o in orders:
                 # 过滤：只保留我们策略标的的挂单，防止其他币种混入
                 if o.get("instrument_name", "") != instrument:
-                    self._log_info("Ignored non-%s order: %s %s @ %s",
-                                   instrument, o.get("instrument_name"),
-                                   o.get("direction"), o.get("price"))
+                    logger.debug("Ignored non-%s order: %s %s @ %s",
+                                 instrument, o.get("instrument_name"),
+                                 o.get("direction"), o.get("price"))
                     continue
                 filled = float(o.get("filled_amount", 0) or 0)
                 amount = float(o.get("amount", 0) or 0)
