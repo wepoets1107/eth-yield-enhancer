@@ -304,9 +304,9 @@ class StrategyEngine:
         if self._trading_enabled:
             return False
         self._trading_enabled = True
-        # 等待 _init_strategy 完成再存盘，防止空壳覆盖已恢复的交易记录和初始值
+        # 等待 _init_strategy 完成再存盘（status 进入 ready/running），防止空壳覆盖已恢复数据
         for _ in range(20):  # 最多等 10 秒
-            if self.status != "initializing":
+            if self.status in ("ready", "running"):
                 break
             time.sleep(0.5)
         self._save_state()
