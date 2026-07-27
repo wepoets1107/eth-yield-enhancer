@@ -517,11 +517,18 @@ class StrategyEngine:
                 self.buy_inventory = [list(x) for x in saved.get("buy_inventory", [])]
             else:
                 self._recompute_inventory_from_trades()
-            # 初始值：恢复（用于 PNL 计算），缺失则用当前余额兜底
-            self.initial_usdc = saved.get("initial_usdc", bal["usdc_balance"])
-            self.initial_btc = saved.get("initial_btc", bal["btc_balance"])
-            self.initial_total_usdc = saved.get("initial_total_usdc",
-                bal["usdc_balance"] + bal["btc_balance"] * price)
+            # 初始值：恢复（用于 PNL 计算）。.get() 遇到值=0 不回退到默认值，
+            # 所以显式判断：saved 值 > 0 才恢复，否则用当前余额快照。
+            saved_initial = saved.get("initial_total_usdc", 0)
+            if saved_initial > 0:
+                self.initial_total_usdc = saved_initial
+                self.initial_usdc = saved.get("initial_usdc", bal["usdc_balance"])
+                self.initial_btc = saved.get("initial_btc", bal["btc_balance"])
+            else:
+                self.initial_usdc = bal["usdc_balance"]
+                self.initial_btc = bal["btc_balance"]
+                self.initial_total_usdc = self.initial_usdc + self.initial_btc * price
+                logger.info("Initial total_usdc reset to current balance (saved was 0 or missing)")
             # 重启后自动恢复交易状态
             if saved.get("was_trading"):
                 self._trading_enabled = True
