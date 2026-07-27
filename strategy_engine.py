@@ -989,8 +989,8 @@ class StrategyEngine:
                         self._our_buy_id = None
                     else:
                         self._our_sell_id = None
-                self._log_info("Cancelled stale %s order at %.2f (target %.2f)",
-                               o["side"], o["price"], target)
+                    self._log_info("Cancelled stale %s order at %.2f (target %.2f)",
+                                   o["side"], o["price"], target)
 
         # --- 孤儿单清理：交易所滞留、引擎未追踪、且已偏离目标价的本策略挂单 ---
         # 认领只认价格精确等于目标价，stale 撤单只对引擎记录的 ID 生效；
