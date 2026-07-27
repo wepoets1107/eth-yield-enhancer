@@ -98,7 +98,7 @@ _load_env_file()
 
 
 def _save_env(client_id, client_secret):
-    """将 Deribit 凭证写回 .env 文件，保证重启后不丢失"""
+    """将 Deribit 凭证写回 .env 文件，保证重启后不丢失（原子写入，防写一半崩溃损坏）"""
     try:
         lines = []
         if os.path.exists(ENV_FILE):
@@ -116,8 +116,23 @@ def _save_env(client_id, client_secret):
             lines.append(f"DERIBIT_ID={client_id}\n")
         if not found_secret:
             lines.append(f"DERIBIT_SECRET={client_secret}\n")
-        with open(ENV_FILE, "w", encoding="utf-8") as f:
-            f.writelines(lines)
+        import tempfile
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", dir=os.path.dirname(ENV_FILE), delete=False,
+            suffix=".tmp", encoding="utf-8",
+        )
+        try:
+            tmp.writelines(lines)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+            tmp.close()
+            os.replace(tmp.name, ENV_FILE)
+        except Exception:
+            try:
+                os.unlink(tmp.name)
+            except Exception:
+                pass
+            raise
         logger.info(".env file updated")
     except Exception as e:
         logger.error("Failed to save .env: %s", e)
@@ -128,6 +143,9 @@ def _save_env(client_id, client_secret):
 DERIBIT_CLIENT_ID = os.environ.get("DERIBIT_ID", "")
 DERIBIT_CLIENT_SECRET = os.environ.get("DERIBIT_SECRET", "")
 USE_TESTNET = os.environ.get("DERIBIT_TESTNET", "1") == "1"
+
+# 可选 API 访问令牌：设置环境变量 API_TOKEN 后，所有写操作(POST)需带 X-API-Token 头
+API_TOKEN = os.environ.get("API_TOKEN", "").strip()
 
 if not DERIBIT_CLIENT_ID or not DERIBIT_CLIENT_SECRET:
     raise RuntimeError(
@@ -208,6 +226,17 @@ def on_state_update(state: dict):
     broadcast_state(state)
 
 
+def _require_token():
+    """写操作鉴权：配置了 API_TOKEN 时，请求须带 X-API-Token 头且匹配，否则 403。
+    未配置 API_TOKEN 则放行（保持本地无鉴权行为）。"""
+    if not API_TOKEN:
+        return None
+    token = request.headers.get("X-API-Token", "").strip()
+    if token != API_TOKEN:
+        return jsonify({"success": False, "message": "Invalid or missing API token"}), 403
+    return None
+
+
 # ---------------------------------------------------------------------------
 # 页面路由
 # ---------------------------------------------------------------------------
@@ -218,6 +247,14 @@ def index():
     html_path = os.path.join(os.path.dirname(__file__), "static", "dashboard.html")
     with open(html_path, "r", encoding="utf-8") as f:
         content = f.read()
+    # 若启用了 API_TOKEN，向前端注入令牌 + fetch 拦截器（自动给所有请求加 X-API-Token 头）
+    if API_TOKEN:
+        inject = (
+            "<script>window.API_TOKEN=" + json.dumps(API_TOKEN) + ";"
+            "(function(){var o=window.fetch;window.fetch=function(u,op){op=op||{};op.headers=op.headers||{};"
+            "op.headers['X-API-Token']=window.API_TOKEN;return o(u,op);};})();</script>"
+        )
+        content = content.replace("</body>", inject + "</body>", 1) if "</body>" in content else content + inject
     resp = make_response(content)
     resp.headers["Content-Type"] = "text/html; charset=utf-8"
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
@@ -241,6 +278,9 @@ def api_status():
 def api_init():
     """初始化引擎（连接+拉数据）。如果引擎已在运行，保持不动。"""
     global engine
+    denied = _require_token()
+    if denied:
+        return denied
     with engine_lock:
         if engine and engine._running:
             # 引擎已经在跑（不论是否交易中）→ 保持现状，不碰
@@ -268,6 +308,9 @@ def api_init():
 def api_start():
     """启动交易"""
     global engine
+    denied = _require_token()
+    if denied:
+        return denied
     with engine_lock:
         # 如果引擎不存在或已停止，先初始化
         if engine is None or not engine._running:
@@ -295,6 +338,9 @@ def api_start():
 
 @app.route("/api/stop", methods=["POST"])
 def api_stop():
+    denied = _require_token()
+    if denied:
+        return denied
     if engine is None:
         return jsonify({"error": "No strategy running"}), 400
     engine.stop()
@@ -314,6 +360,9 @@ def api_credentials():
         })
 
     # POST — 更新凭证，停旧引擎，重建连接
+    denied = _require_token()
+    if denied:
+        return denied
     data = request.get_json()
     if not data:
         return jsonify({"success": False, "message": "No data"}), 400
@@ -371,6 +420,9 @@ def api_params():
             })
 
     # POST — 修改参数
+    denied = _require_token()
+    if denied:
+        return denied
     if engine is None:
         return jsonify({"error": "Engine not initialized"}), 503
     data = request.get_json()
@@ -485,19 +537,47 @@ def api_config():
         if engine is None:
             return jsonify({"error": "Engine not initialized"}), 503
         return jsonify(engine.cfg)
+    denied = _require_token()
+    if denied:
+        return denied
     data = request.get_json()
     if not data:
         return jsonify({"success": False, "message": "No data"}), 400
     if engine and engine._running:
         return jsonify({"success": False, "message": "Cannot modify config while running"}), 400
+    changed = []
     with engine_lock:
         if engine is None:
             use_testnet = data.get("testnet", USE_TESTNET)
             engine = StrategyEngine(DERIBIT_CLIENT_ID, DERIBIT_CLIENT_SECRET, testnet=use_testnet, state_callback=on_state_update)
-        for key, val in data.items():
-            if key in engine.cfg:
-                engine.cfg[key] = val
-    return jsonify({"success": True, "message": "Config updated"})
+        # 整数型参数（带范围校验）
+        for key, (lo, hi) in {"poll_interval": (5, 300), "cooldown_seconds": (10, 600),
+                               "rv_update_interval_minutes": (5, 1440)}.items():
+            if key in data:
+                try:
+                    val = int(data[key])
+                    if lo <= val <= hi:
+                        engine.cfg[key] = val
+                        changed.append(f"{key}={val}")
+                except (TypeError, ValueError):
+                    pass
+        # 浮点型参数（带范围校验）
+        for key, (lo, hi) in {"trade_size_usdc": (10, 10000), "rv_min": (0.0001, 0.05),
+                              "rv_max": (0.001, 0.1), "stale_threshold": (0.01, 1000),
+                              "min_poll_balance_usdc": (10, 10000)}.items():
+            if key in data:
+                try:
+                    val = float(data[key])
+                    if lo <= val <= hi:
+                        engine.cfg[key] = val
+                        changed.append(f"{key}={val}")
+                except (TypeError, ValueError):
+                    pass
+        # 标的（仅未运行时可改，限定取值）
+        if "instrument_name" in data and data["instrument_name"] in ("BTC_USDC", "ETH_USDC"):
+            engine.cfg["instrument_name"] = data["instrument_name"]
+            changed.append(f"instrument_name={data['instrument_name']}")
+    return jsonify({"success": True, "changed": changed})
 
 
 # ---------------------------------------------------------------------------

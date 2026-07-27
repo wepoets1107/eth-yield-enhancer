@@ -946,6 +946,9 @@ class StrategyEngine:
                         "label": "maker",
                     })
                     self.total_trades += 1
+                    # 内存 trades 上限（PNL 已增量维护，历史仅展示用）
+                    if len(self.trades) > 500:
+                        self.trades = self.trades[-500:]
                 self._save_state()
                 # 取消对侧挂单（价位已经变了）
                 other_id = self._our_buy_id if side_key == "sell" else self._our_sell_id
