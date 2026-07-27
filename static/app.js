@@ -182,7 +182,7 @@
     setVal("vTrades", data.total_trades != null ? data.total_trades : "0");
 
     var tp = "--", tpCls = "";
-    if (data.initial_total_usdc && data.total_value_usdc) {
+    if (data.initial_total_usdc > 0 && data.total_value_usdc > 0) {
       var diff = data.total_value_usdc - data.initial_total_usdc;
       var pct = (diff / data.initial_total_usdc) * 100;
       tp = (diff >= 0 ? "+" : "") + diff.toFixed(2) + " (" + (pct >= 0 ? "+" : "") + pct.toFixed(2) + "%)";
