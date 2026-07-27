@@ -304,7 +304,12 @@ class StrategyEngine:
         if self._trading_enabled:
             return False
         self._trading_enabled = True
-        self._save_state()  # 立即保存 was_trading=true，重启后可恢复
+        # 等待 _init_strategy 完成再存盘，防止空壳覆盖已恢复的交易记录和初始值
+        for _ in range(20):  # 最多等 10 秒
+            if self.status != "initializing":
+                break
+            time.sleep(0.5)
+        self._save_state()
         self._log_info("=== 交易已启动 ===")
         # 状态由 _data_loop 在下一轮自动切换为 running
         self._notify_state()
