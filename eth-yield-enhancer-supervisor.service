@@ -1,0 +1,19 @@
+[Unit]
+Description=ETH Yield Enhancer - Linux Supervisor (auto-heal engine)
+After=network.target eth-yield-enhancer.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/openclaw-workspace/eth-yield-enhancer
+Environment=PATH=/root/openclaw-workspace/eth-yield-enhancer/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+# ETH 与 BTC 同机部署时错开端口：btc=5050, eth=5051（与 app.py --port 保持一致）
+Environment=SUPERVISOR_PORT=5051
+ExecStart=/root/openclaw-workspace/eth-yield-enhancer/venv/bin/python /root/openclaw-workspace/eth-yield-enhancer/supervisor_linux.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
